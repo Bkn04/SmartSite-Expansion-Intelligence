@@ -3,9 +3,9 @@ import { STORAGE_KEYS } from './constants';
 
 // Configure localforage
 localforage.config({
-  name: 'CottiCoffeeRoutePlanner',
+  name: 'SmartSiteExpansionIntelligence',
   version: 1.0,
-  storeName: 'cotti_data'
+  storeName: 'smartsite_data'
 });
 
 /**

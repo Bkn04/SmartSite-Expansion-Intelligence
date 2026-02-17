@@ -16,7 +16,7 @@ export async function geocodeAddress(address) {
         viewbox: '-74.2591,40.4774,-73.7004,40.9176' // NYC bounds
       },
       headers: {
-        'User-Agent': 'CottiCoffeeRoutePlanner/1.0'
+        'User-Agent': 'SmartSiteExpansionIntelligence/1.0'
       }
     });
 
@@ -55,7 +55,7 @@ export async function reverseGeocode(lat, lng) {
         format: 'json'
       },
       headers: {
-        'User-Agent': 'CottiCoffeeRoutePlanner/1.0'
+        'User-Agent': 'SmartSiteExpansionIntelligence/1.0'
       }
     });
 
@@ -98,7 +98,7 @@ export async function searchAddresses(query) {
         viewbox: '-74.2591,40.4774,-73.7004,40.9176'
       },
       headers: {
-        'User-Agent': 'CottiCoffeeRoutePlanner/1.0'
+        'User-Agent': 'SmartSiteExpansionIntelligence/1.0'
       }
     });
 

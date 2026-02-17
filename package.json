@@ -1,9 +1,9 @@
 {
-  "name": "cotti-coffee-route-planner",
+  "name": "smartsite-expansion-intelligence",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "NYC route planning app for Cotti Coffee store visits",
+  "description": "SmartSite Expansion Intelligence — AI-powered site selection for Cotti Coffee NYC",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

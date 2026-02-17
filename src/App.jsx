@@ -145,8 +145,8 @@ function App() {
       {/* Sidebar */}
       <div className="sidebar">
         <div className="sidebar-header">
-          <h1>库迪咖啡路线规划</h1>
-          <p>Cotti Coffee Route Planner - NYC</p>
+          <h1>SmartSite</h1>
+          <p>Expansion Intelligence — Cotti Coffee NYC</p>
         </div>
 
         <div className="sidebar-content">

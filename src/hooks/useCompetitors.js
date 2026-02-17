@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { fetchCompetitorsForStores } from '../services/competitors';
+import { fetchCompetitorsForStoresFoursquare, hasFoursquareKey } from '../services/foursquare';
 import { competitorStorage } from '../utils/storage';
 import { CACHE_TTL } from '../utils/constants';
 
@@ -7,6 +8,7 @@ export function useCompetitors(stores, enabled = false) {
   const [competitors, setCompetitors] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [dataSource, setDataSource] = useState('osm'); // 'foursquare' | 'osm'
 
   // Load competitors when enabled
   useEffect(() => {
@@ -17,27 +19,40 @@ export function useCompetitors(stores, enabled = false) {
     }
   }, [enabled, stores]);
 
-  // Load competitors from cache or API
+  // Load competitors: try Foursquare first, fall back to OSM Overpass
   const loadCompetitors = useCallback(async () => {
     setIsLoading(true);
     setError(null);
 
     try {
-      // Try to load from cache first
+      // Try cache first
       const cached = await competitorStorage.get();
-
       if (cached && cached.competitors) {
         setCompetitors(cached.competitors);
+        setDataSource(cached.source || 'osm');
         setIsLoading(false);
         return;
       }
 
-      // Fetch from API (0.2 miles = 322 meters)
-      const freshCompetitors = await fetchCompetitorsForStores(stores, 322);
+      let freshCompetitors = null;
+
+      // Attempt Foursquare (0.2 miles = 322 meters)
+      if (hasFoursquareKey()) {
+        freshCompetitors = await fetchCompetitorsForStoresFoursquare(stores, 322);
+        if (freshCompetitors !== null) {
+          setDataSource('foursquare');
+        }
+      }
+
+      // Fall back to Overpass / OSM
+      if (freshCompetitors === null) {
+        freshCompetitors = await fetchCompetitorsForStores(stores, 322);
+        setDataSource('osm');
+      }
 
       setCompetitors(freshCompetitors);
 
-      // Save to cache
+      // Cache with source tag
       await competitorStorage.set(freshCompetitors, CACHE_TTL.COMPETITORS);
     } catch (err) {
       console.error('Error loading competitors:', err);
@@ -47,24 +62,22 @@ export function useCompetitors(stores, enabled = false) {
     }
   }, [stores]);
 
-  // Refresh competitors
+  // Refresh (clear cache then reload)
   const refreshCompetitors = useCallback(async () => {
-    // Clear cache and reload
     await competitorStorage.clear();
     await loadCompetitors();
   }, [loadCompetitors]);
 
-  // Get competitors near a specific store
+  // Competitors near a specific store
   const getCompetitorsNearStore = useCallback((storeId) => {
-    return competitors.filter(comp =>
-      comp.nearStores && comp.nearStores.includes(storeId)
-    );
+    return competitors.filter(c => c.nearStores && c.nearStores.includes(storeId));
   }, [competitors]);
 
   return {
     competitors,
     isLoading,
     error,
+    dataSource,
     refreshCompetitors,
     getCompetitorsNearStore
   };

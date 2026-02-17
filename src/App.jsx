@@ -15,7 +15,6 @@ import { useSubway } from './hooks/useSubway';
 import { calculateFootTrafficScore, generateHeatmapData } from './services/heatmap';
 import { analyzePOIDistribution } from './services/poi';
 import { calculateLocationScore, generateDailyTrafficData, generateWeeklyPattern } from './services/scoring';
-import { findNearestSubwayStation } from './services/subway';
 
 function App() {
   const {
@@ -119,30 +118,27 @@ function App() {
     });
   }, [selectedStore, competitors]);
 
-  // Comprehensive investment score for selected store
+  // Comprehensive investment score for selected store (real MTA data via storeLat/storeLng)
   const scoreResult = useMemo(() => {
     if (!showScoring || !selectedStore) return null;
-    const nearest = findNearestSubwayStation(
-      selectedStore.coordinates.lat,
-      selectedStore.coordinates.lng
-    );
     return calculateLocationScore({
       pois: selectedStorePOIs,
       competitors: selectedStoreCompetitors,
-      nearestSubwayDistance: nearest ? nearest.distance : null
+      storeLat: selectedStore.coordinates.lat,
+      storeLng: selectedStore.coordinates.lng
     });
   }, [showScoring, selectedStore, selectedStorePOIs, selectedStoreCompetitors]);
 
-  // Daily and weekly traffic data for selected store
+  // Daily and weekly traffic data — pass mtaInfo from scoreResult for real ridership scaling
   const dailyTraffic = useMemo(() => {
     if (!showScoring || !selectedStore) return [];
-    return generateDailyTrafficData(selectedStorePOIs);
-  }, [showScoring, selectedStore, selectedStorePOIs]);
+    return generateDailyTrafficData(selectedStorePOIs, false, scoreResult?.mtaInfo ?? null);
+  }, [showScoring, selectedStore, selectedStorePOIs, scoreResult]);
 
   const weeklyPattern = useMemo(() => {
     if (!showScoring || !selectedStore) return [];
-    return generateWeeklyPattern(selectedStorePOIs);
-  }, [showScoring, selectedStore, selectedStorePOIs]);
+    return generateWeeklyPattern(selectedStorePOIs, scoreResult?.mtaInfo ?? null);
+  }, [showScoring, selectedStore, selectedStorePOIs, scoreResult]);
 
   return (
     <div className="app-container">

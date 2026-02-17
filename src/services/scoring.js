@@ -1,179 +1,276 @@
 /**
- * Store Location Scoring Service
- * Generates a comprehensive investment score and detailed reasoning for each store location.
- * Transit score and foot traffic now incorporate real MTA ridership data where available.
+ * Store Location Scoring Service — v2.0
+ *
+ * Redesigned with MTA ridership as the PRIMARY foot-traffic signal.
+ * Five dimensions, total 100 pts:
+ *
+ *   地铁人流量   35pts  MTA weekly ridership × distance decay + POI density bonus
+ *   竞品格局     20pts  brand-weighted competitor count, market-validation bonus
+ *   商业生态     20pts  coffee-shop-specific POI category weights
+ *   区位价值     15pts  station tier + transport hub proximity
+ *   时段覆盖     10pts  office / shopping / transport composition
  */
 
-import { calculateDistance } from '../utils/distance';
 import { generateHourlyDistribution } from './heatmap';
 import { getNearestStationRidership, getRidershipLabel, formatRidership } from './mtaRidership';
 
-// Scoring weights (total = 100)
+// ─── Scoring weights (must sum to 100) ───────────────────────────────────────
 const WEIGHTS = {
-  FOOT_TRAFFIC: 30,       // 人流量
-  COMPETITION: 20,        // 竞品竞争压力
-  BUSINESS_ECOSYSTEM: 20, // 业态生态
-  TRANSIT_ACCESS: 15,     // 交通便利性
-  TIME_COVERAGE: 15       // 营业时段覆盖性
+  SUBWAY_TRAFFIC:  35,
+  COMPETITION:     20,
+  ECOSYSTEM:       20,
+  LOCATION_VALUE:  15,
+  TIME_COVERAGE:   10
 };
 
-// Business category boost scores
-const CATEGORY_BOOSTS = {
-  SHOPPING: 1.4,
-  TRANSPORT: 1.5,
-  OFFICE: 1.3,
-  EDUCATION: 1.2,
-  FOOD: 1.1,
-  ENTERTAINMENT: 1.0,
-  PARK: 0.7,
-  RESIDENTIAL: 0.6
+// Category values tuned for coffee-shop business model
+const CATEGORY_VALUE = {
+  OFFICE:        2.5,  // Daily buyers, high LTV
+  TRANSPORT:     2.0,  // Consistent all-day flow
+  SHOPPING:      1.8,  // Afternoon & weekend spikes
+  EDUCATION:     1.5,  // Student regulars
+  FOOD:          1.0,  // F&B density = traffic signal, but competitive
+  ENTERTAINMENT: 0.8,
+  PARK:          0.4,
+  RESIDENTIAL:   0.3   // Low-frequency, price-sensitive
 };
 
-/**
- * Calculate comprehensive investment score for a store location.
- * Pass storeLat/storeLng to enable real MTA ridership lookup.
- */
+// Foursquare brand competition weights (Starbucks/Luckin = strongest signals)
+const BRAND_WEIGHT = {
+  STARBUCKS:    1.5,
+  LUCKIN:       1.4,
+  BLANK_STREET: 1.2,
+  DUNKIN:       1.0
+};
+
+const MAX_WEEKLY_RIDERSHIP = 650000; // Times Square benchmark
+
+// ─── Main entry point ────────────────────────────────────────────────────────
+
 export function calculateLocationScore({
   pois = [],
   competitors = [],
   nearestSubwayDistance = null,
-  currentHour = new Date().getHours(),
   isWeekend = [0, 6].includes(new Date().getDay()),
   storeLat = null,
   storeLng = null
 }) {
-  const scoreBreakdown = {};
-
-  // Look up real MTA ridership data if coordinates provided
   const mtaInfo = (storeLat && storeLng)
     ? getNearestStationRidership(storeLat, storeLng)
     : null;
 
-  // Use real station distance if MTA lookup succeeded
   const subwayDist = mtaInfo ? mtaInfo.distance : nearestSubwayDistance;
 
-  // 1. Foot Traffic Score (30 pts) — uses real MTA ridership when available
-  scoreBreakdown.footTraffic = calcFootTrafficScore(pois, mtaInfo);
+  const scoreBreakdown = {
+    footTraffic:  calcSubwayTrafficScore(pois, mtaInfo),
+    competition:  calcCompetitionScore(competitors),
+    ecosystem:    calcEcosystemScore(pois),
+    transit:      calcLocationValueScore(pois, mtaInfo, subwayDist),
+    timeCoverage: calcTimeCoverageScore(pois, isWeekend)
+  };
 
-  // 2. Competition Score (20 pts)
-  scoreBreakdown.competition = calcCompetitionScore(competitors.length);
-
-  // 3. Business Ecosystem Score (20 pts)
-  scoreBreakdown.ecosystem = calcEcosystemScore(pois);
-
-  // 4. Transit Access Score (15 pts) — uses real ridership-weighted score
-  scoreBreakdown.transit = calcTransitScore(subwayDist, mtaInfo);
-
-  // 5. Time Coverage Score (15 pts)
-  scoreBreakdown.timeCoverage = calcTimeCoverageScore(isWeekend);
-
-  // Total
-  const total = Object.values(scoreBreakdown).reduce((sum, s) => sum + s.weighted, 0);
+  const total   = Object.values(scoreBreakdown).reduce((s, d) => s + d.weighted, 0);
   const overall = Math.min(100, Math.round(total));
-  const grade = getGrade(overall);
-  const reasons = generateReasons(scoreBreakdown, competitors.length, pois, subwayDist, mtaInfo);
-  const recommendation = generateRecommendation(overall, scoreBreakdown);
-  const dailyTraffic = generateDailyTrafficData(pois, isWeekend, mtaInfo);
+  const grade   = getGrade(overall);
 
-  return { overall, grade, scoreBreakdown, reasons, recommendation, dailyTraffic, mtaInfo };
+  const reasons        = generateReasons(scoreBreakdown, competitors, pois, subwayDist, mtaInfo);
+  const recommendation = generateRecommendation(overall, scoreBreakdown, mtaInfo, competitors.length);
+
+  return { overall, grade, scoreBreakdown, reasons, recommendation, mtaInfo };
 }
 
-/** Foot Traffic Score — blends POI density with real MTA station ridership */
-function calcFootTrafficScore(pois, mtaInfo) {
-  const count = pois.length;
-  const highValue = pois.filter(p => ['SHOPPING', 'TRANSPORT', 'OFFICE'].includes(p.category)).length;
+// ─── Dimension 1: 地铁人流量 (35 pts) ────────────────────────────────────────
+// MTA ridership is the primary signal; POI high-value density adds a bonus.
 
-  // POI-based base score (0–60)
-  let poiScore = Math.min(60, count * 3 + highValue * 5);
+function calcSubwayTrafficScore(pois, mtaInfo) {
+  let raw;
 
-  // MTA ridership bonus (0–40) — real data
-  let ridershipBonus = 0;
   if (mtaInfo) {
-    // footTrafficScore from MTA is 0–100; scale to 0–40 bonus points
-    ridershipBonus = Math.round(mtaInfo.footTrafficScore * 0.4);
+    // Ridership → 0-100 (linear, capped at MAX)
+    const ridershipRaw = Math.min(100, (mtaInfo.weeklyRidership / MAX_WEEKLY_RIDERSHIP) * 100);
+
+    // Gentler distance decay: 0 miles = ×1.0, 0.5 miles = ×0.25, floor = 0.2
+    const distMult = Math.max(0.2, 1 - mtaInfo.distance * 1.5);
+    const stationScore = ridershipRaw * distMult;
+
+    // High-value POI bonus (office, transport, shopping) — up to +20 pts
+    const highValuePOIs = pois.filter(p =>
+      ['OFFICE', 'TRANSPORT', 'SHOPPING'].includes(p.category)
+    ).length;
+    const poiBonus = Math.min(20, highValuePOIs * 3);
+
+    raw = Math.min(100, stationScore + poiBonus);
+  } else {
+    // No MTA data: pure POI density proxy
+    const count     = pois.length;
+    const highValue = pois.filter(p =>
+      ['SHOPPING', 'TRANSPORT', 'OFFICE'].includes(p.category)
+    ).length;
+    raw = Math.min(100, count * 4 + highValue * 6);
   }
 
-  const raw = Math.min(100, poiScore + ridershipBonus);
-  const weighted = (raw / 100) * WEIGHTS.FOOT_TRAFFIC;
-
+  const weighted = (raw / 100) * WEIGHTS.SUBWAY_TRAFFIC;
   return {
-    raw: Math.round(raw),
-    weighted: Math.round(weighted),
-    maxWeight: WEIGHTS.FOOT_TRAFFIC,
-    label: '人流量'
+    raw:       Math.round(raw),
+    weighted:  Math.round(weighted * 10) / 10,
+    maxWeight: WEIGHTS.SUBWAY_TRAFFIC,
+    label:     '地铁人流'
   };
 }
 
-/** Competition Score — fewer competitors = higher score */
-function calcCompetitionScore(competitorCount) {
-  let raw;
-  if (competitorCount === 0) raw = 100;
-  else if (competitorCount === 1) raw = 85;
-  else if (competitorCount === 2) raw = 70;
-  else if (competitorCount === 3) raw = 55;
-  else if (competitorCount <= 5) raw = 40;
-  else raw = 20;
+// ─── Dimension 2: 竞品格局 (20 pts) ──────────────────────────────────────────
+// Brand-weighted competitor count. 1-2 competitors → market-validation bonus.
 
-  const weighted = (raw / 100) * WEIGHTS.COMPETITION;
-  return { raw, weighted: Math.round(weighted), maxWeight: WEIGHTS.COMPETITION, label: '竞争环境' };
+function calcCompetitionScore(competitors) {
+  const adjusted = competitors.reduce((sum, c) => {
+    const w = BRAND_WEIGHT[c.brand] ?? 0.8;
+    return sum + w;
+  }, 0);
+
+  let raw;
+  if      (adjusted === 0)  raw = 100;
+  else if (adjusted < 1.5)  raw = 82;
+  else if (adjusted < 2.5)  raw = 68;
+  else if (adjusted < 4)    raw = 52;
+  else if (adjusted < 6)    raw = 36;
+  else                       raw = 18;
+
+  // Market-validation: 1-2 competitors prove the area supports coffee
+  const validationBonus = (competitors.length >= 1 && competitors.length <= 2) ? 5 : 0;
+  const finalRaw = Math.min(100, raw + validationBonus);
+
+  const weighted = (finalRaw / 100) * WEIGHTS.COMPETITION;
+  return {
+    raw:          finalRaw,
+    weighted:     Math.round(weighted * 10) / 10,
+    maxWeight:    WEIGHTS.COMPETITION,
+    label:        '竞品格局',
+    adjustedCount: Math.round(adjusted * 10) / 10
+  };
 }
 
-/** Business Ecosystem Score */
+// ─── Dimension 3: 商业生态 (20 pts) ──────────────────────────────────────────
+
 function calcEcosystemScore(pois) {
   if (pois.length === 0) {
-    return { raw: 20, weighted: Math.round(0.2 * WEIGHTS.BUSINESS_ECOSYSTEM), maxWeight: WEIGHTS.BUSINESS_ECOSYSTEM, label: '业态生态' };
+    return {
+      raw: 15, weighted: Math.round(0.15 * WEIGHTS.ECOSYSTEM * 10) / 10,
+      maxWeight: WEIGHTS.ECOSYSTEM, label: '商业生态'
+    };
   }
 
-  const uniqueCategories = new Set(pois.map(p => p.category));
-  const diversityBonus = Math.min(30, uniqueCategories.size * 5);
+  const cats = {};
+  pois.forEach(p => { cats[p.category] = (cats[p.category] || 0) + 1; });
 
-  let categoryBoost = 0;
-  pois.forEach(poi => { categoryBoost += (CATEGORY_BOOSTS[poi.category] || 1.0); });
-  const avgBoost = categoryBoost / pois.length;
+  // Category diversity bonus (up to 25)
+  const diversityScore = Math.min(25, Object.keys(cats).length * 4);
 
-  const raw = Math.min(100, diversityBonus + avgBoost * 25);
-  const weighted = (raw / 100) * WEIGHTS.BUSINESS_ECOSYSTEM;
-  return { raw: Math.round(raw), weighted: Math.round(weighted), maxWeight: WEIGHTS.BUSINESS_ECOSYSTEM, label: '业态生态' };
+  // Density score weighted by category value (up to 50)
+  const officeN    = cats.OFFICE    || 0;
+  const transportN = cats.TRANSPORT || 0;
+  const shoppingN  = cats.SHOPPING  || 0;
+  const otherN     = pois.length - officeN - transportN - shoppingN;
+  const densityScore = Math.min(50,
+    officeN * 7 + transportN * 6 + shoppingN * 5 + otherN * 2
+  );
+
+  // Avg category-value bonus (up to 25)
+  const totalValue = pois.reduce((s, p) => s + (CATEGORY_VALUE[p.category] || 1.0), 0);
+  const avgValue   = totalValue / pois.length;
+  const valueBonus = Math.min(25, (avgValue - 1.0) * 20);
+
+  const raw     = Math.min(100, diversityScore + densityScore + valueBonus);
+  const weighted = (raw / 100) * WEIGHTS.ECOSYSTEM;
+  return {
+    raw:       Math.round(raw),
+    weighted:  Math.round(weighted * 10) / 10,
+    maxWeight: WEIGHTS.ECOSYSTEM,
+    label:     '商业生态',
+    catBreakdown: cats
+  };
 }
 
-/** Transit Access Score — uses real MTA ridership when available */
-function calcTransitScore(subwayDist, mtaInfo) {
+// ─── Dimension 4: 区位价值 (15 pts) ──────────────────────────────────────────
+// Station tier (superstation = midtown/downtown premium) + transport POI density.
+
+function calcLocationValueScore(pois, mtaInfo, subwayDist) {
   let raw;
 
   if (mtaInfo) {
-    // Blend distance score + ridership score for a more accurate picture
-    let distScore;
-    if (subwayDist <= 0.1)      distScore = 100;
-    else if (subwayDist <= 0.2) distScore = 88;
-    else if (subwayDist <= 0.3) distScore = 72;
-    else if (subwayDist <= 0.5) distScore = 52;
-    else                         distScore = 28;
+    const wr = mtaInfo.weeklyRidership;
+    // Tier score based on station grade
+    let tierScore;
+    if      (wr >= 500000) tierScore = 85; // Times Sq / Grand Central tier
+    else if (wr >= 300000) tierScore = 72; // Penn Station / Fulton tier
+    else if (wr >= 150000) tierScore = 56; // Mid-tier hubs
+    else if (wr >= 75000)  tierScore = 40;
+    else                    tierScore = 22;
 
-    // Ridership bonus: up to +15 pts for a top-tier station
-    const ridershipBonus = Math.round(mtaInfo.footTrafficScore * 0.15);
-    raw = Math.min(100, distScore + ridershipBonus);
+    // Distance modifier: softer floor (0.2) so far stations still contribute
+    const distMod = Math.max(0.2, 1 - subwayDist * 2);
+
+    // Transport POI bonus (up to 15)
+    const transportPOIs = pois.filter(p => p.category === 'TRANSPORT').length;
+    const transportBonus = Math.min(15, transportPOIs * 5);
+
+    raw = Math.min(100, tierScore * distMod + transportBonus);
   } else if (subwayDist !== null) {
-    if (subwayDist <= 0.1)      raw = 100;
-    else if (subwayDist <= 0.2) raw = 90;
-    else if (subwayDist <= 0.3) raw = 75;
-    else if (subwayDist <= 0.5) raw = 55;
-    else                         raw = 30;
+    if      (subwayDist <= 0.1) raw = 85;
+    else if (subwayDist <= 0.2) raw = 70;
+    else if (subwayDist <= 0.3) raw = 55;
+    else if (subwayDist <= 0.5) raw = 38;
+    else                         raw = 20;
   } else {
-    raw = 50; // unknown
+    raw = 40;
   }
 
-  const weighted = (raw / 100) * WEIGHTS.TRANSIT_ACCESS;
-  return { raw: Math.round(raw), weighted: Math.round(weighted), maxWeight: WEIGHTS.TRANSIT_ACCESS, label: '交通便利性' };
+  const weighted = (raw / 100) * WEIGHTS.LOCATION_VALUE;
+  return {
+    raw:       Math.round(raw),
+    weighted:  Math.round(weighted * 10) / 10,
+    maxWeight: WEIGHTS.LOCATION_VALUE,
+    label:     '区位价值'
+  };
 }
 
-/** Time Coverage Score */
-function calcTimeCoverageScore(isWeekend) {
-  const raw = isWeekend ? 75 : 85;
+// ─── Dimension 5: 时段覆盖 (10 pts) ──────────────────────────────────────────
+
+function calcTimeCoverageScore(pois, isWeekend) {
+  const cats = {};
+  pois.forEach(p => { cats[p.category] = (cats[p.category] || 0) + 1; });
+
+  let score = 45; // base
+
+  // Weekday morning rush (offices)
+  if      ((cats.OFFICE || 0) >= 3) score += 20;
+  else if ((cats.OFFICE || 0) >= 1) score += 10;
+
+  // Lunch / afternoon (F&B + shopping)
+  if      ((cats.SHOPPING || 0) >= 2 || (cats.FOOD || 0) >= 3) score += 20;
+  else if ((cats.SHOPPING || 0) >= 1 || (cats.FOOD || 0) >= 2) score += 10;
+
+  // All-day (transit hub)
+  if ((cats.TRANSPORT || 0) >= 1) score += 15;
+
+  // Residential-dominant: weak peak hours
+  if ((cats.RESIDENTIAL || 0) > pois.length * 0.4) score -= 20;
+
+  // Weekend: shopping helps, office heavy hurts
+  if (isWeekend && (cats.SHOPPING || 0) >= 2) score += 5;
+  if (isWeekend && (cats.OFFICE   || 0) > pois.length * 0.5) score -= 10;
+
+  const raw     = Math.max(20, Math.min(100, score));
   const weighted = (raw / 100) * WEIGHTS.TIME_COVERAGE;
-  return { raw, weighted: Math.round(weighted), maxWeight: WEIGHTS.TIME_COVERAGE, label: '时段覆盖' };
+  return {
+    raw,
+    weighted:  Math.round(weighted * 10) / 10,
+    maxWeight: WEIGHTS.TIME_COVERAGE,
+    label:     '时段覆盖'
+  };
 }
 
-/** Convert score to letter grade */
+// ─── Grade & presentation ─────────────────────────────────────────────────────
+
 function getGrade(score) {
   if (score >= 85) return { letter: 'A+', label: '强烈推荐', color: '#10B981' };
   if (score >= 75) return { letter: 'A',  label: '推荐',     color: '#34D399' };
@@ -184,122 +281,208 @@ function getGrade(score) {
   return              { letter: 'F',  label: '不推荐',   color: '#EF4444' };
 }
 
-/** Generate human-readable reasons */
-function generateReasons(breakdown, competitorCount, pois, subwayDist, mtaInfo) {
+function generateReasons(breakdown, competitors, pois, subwayDist, mtaInfo) {
   const reasons = [];
 
-  // Foot traffic — mention real MTA data if available
+  // ── Subway / foot traffic ──────────────────────────────────────────────────
   if (mtaInfo) {
-    const label = getRidershipLabel(mtaInfo.station.weeklyRidership);
-    const count = formatRidership(mtaInfo.station.weeklyRidership);
+    const label  = getRidershipLabel(mtaInfo.weeklyRidership);
+    const count  = formatRidership(mtaInfo.weeklyRidership);
     const distFt = Math.round(mtaInfo.distance * 5280);
-    if (breakdown.footTraffic.raw >= 65) {
-      reasons.push({ type: 'positive', icon: '✅', text: `${mtaInfo.station.name}（${label}，${count}）距此${distFt}英尺，带来稳定客流` });
-    } else if (breakdown.footTraffic.raw >= 40) {
-      reasons.push({ type: 'neutral', icon: '➡️', text: `附近地铁站（${count}）人流量中等，步行${distFt}英尺` });
+    const name   = mtaInfo.station.name;
+
+    if      (mtaInfo.weeklyRidership >= 400000) {
+      reasons.push({ type: 'positive', icon: '🚇',
+        text: `${name}（${label}，${count}）距此 ${distFt} 英尺 — 顶级客流枢纽，早高峰通勤人流密集，适合咖啡消费场景` });
+    } else if (mtaInfo.weeklyRidership >= 200000) {
+      reasons.push({ type: 'positive', icon: '🚇',
+        text: `${name}（${label}，${count}）距此 ${distFt} 英尺，客流稳定充足` });
+    } else if (mtaInfo.weeklyRidership >= 100000) {
+      reasons.push({ type: 'neutral', icon: '🚶',
+        text: `${name}（${label}，${count}）距此 ${distFt} 英尺，客流中等` });
     } else {
-      reasons.push({ type: 'negative', icon: '⚠️', text: `最近地铁站（${count}）客流有限，且距离${distFt}英尺` });
+      reasons.push({ type: 'negative', icon: '⚠️',
+        text: `${name}（${label}，${count}）距此 ${distFt} 英尺，站点客流有限，需依赖周边商业带动` });
     }
   } else {
-    if (breakdown.footTraffic.raw >= 70) {
-      reasons.push({ type: 'positive', icon: '✅', text: `周边设施密集（${pois.length}个），人流潜力强` });
+    const n = pois.length;
+    if      (breakdown.footTraffic.raw >= 65) {
+      reasons.push({ type: 'positive', icon: '✅', text: `周边设施密集（${n} 个），人流潜力强` });
     } else if (breakdown.footTraffic.raw >= 40) {
-      reasons.push({ type: 'neutral', icon: '➡️', text: `周边设施一般（${pois.length}个），人流量中等` });
+      reasons.push({ type: 'neutral',  icon: '➡️', text: `周边设施一般（${n} 个），人流量中等` });
     } else {
-      reasons.push({ type: 'negative', icon: '⚠️', text: `周边设施稀少（${pois.length}个），自然人流不足` });
+      reasons.push({ type: 'negative', icon: '⚠️', text: `周边设施稀少（${n} 个），自然人流不足` });
     }
   }
 
-  // Competition
-  if (competitorCount === 0) {
-    reasons.push({ type: 'positive', icon: '✅', text: '0.2英里内无竞品，市场空白' });
-  } else if (competitorCount <= 2) {
-    reasons.push({ type: 'neutral', icon: '➡️', text: `附近${competitorCount}家竞品，竞争适中` });
+  // ── Competition ────────────────────────────────────────────────────────────
+  const sbCount = competitors.filter(c => c.brand === 'STARBUCKS').length;
+  const lkCount = competitors.filter(c => c.brand === 'LUCKIN').length;
+  const dkCount = competitors.filter(c => c.brand === 'DUNKIN').length;
+  const bsCount = competitors.filter(c => c.brand === 'BLANK_STREET').length;
+
+  if (competitors.length === 0) {
+    reasons.push({ type: 'positive', icon: '✅',
+      text: '0.2 英里内无直接竞品，先发优势明显，市场空白待填补' });
   } else {
-    reasons.push({ type: 'negative', icon: '⚠️', text: `附近${competitorCount}家竞品，竞争激烈` });
+    const parts = [];
+    if (sbCount > 0) parts.push(`星巴克×${sbCount}`);
+    if (lkCount > 0) parts.push(`瑞幸×${lkCount}`);
+    if (dkCount > 0) parts.push(`Dunkin×${dkCount}`);
+    if (bsCount > 0) parts.push(`Blank Street×${bsCount}`);
+    const otherN = competitors.length - sbCount - lkCount - dkCount - bsCount;
+    if (otherN > 0) parts.push(`其他×${otherN}`);
+
+    if (competitors.length <= 2) {
+      reasons.push({ type: 'neutral', icon: '☕',
+        text: `附近 ${parts.join('、')}，竞争存在但市场已被验证，差异化可突围` });
+    } else {
+      reasons.push({ type: 'negative', icon: '⚠️',
+        text: `竞品密集：${parts.join('、')}，需明确差异化定位（性价比 / 社交体验 / 速取效率）` });
+    }
   }
 
-  // Ecosystem details
-  const officeCount    = pois.filter(p => p.category === 'OFFICE').length;
-  const shopCount      = pois.filter(p => p.category === 'SHOPPING').length;
-  const transportCount = pois.filter(p => p.category === 'TRANSPORT').length;
+  // ── Ecosystem highlights ───────────────────────────────────────────────────
+  const cats = {};
+  pois.forEach(p => { cats[p.category] = (cats[p.category] || 0) + 1; });
 
-  if (officeCount >= 3)    reasons.push({ type: 'positive', icon: '🏢', text: `${officeCount}个办公楼，午餐/早餐时段客流稳定` });
-  if (shopCount >= 2)      reasons.push({ type: 'positive', icon: '🛍️', text: `${shopCount}个商业设施，周末客流量大` });
-  if (transportCount >= 1) reasons.push({ type: 'positive', icon: '🚇', text: '交通枢纽附近，过路客流充足' });
+  if ((cats.OFFICE || 0) >= 3) {
+    reasons.push({ type: 'positive', icon: '🏢',
+      text: `${cats.OFFICE} 个办公楼/商业楼，工作日早晨 + 午餐时段消费能力强，复购率高` });
+  } else if ((cats.OFFICE || 0) >= 1) {
+    reasons.push({ type: 'neutral', icon: '🏢',
+      text: `${cats.OFFICE} 个办公场所，有工作日消费基础` });
+  }
 
-  // Transit
-  if (subwayDist !== null) {
-    const ft = Math.round(subwayDist * 5280);
-    const stationName = mtaInfo ? mtaInfo.station.name : '地铁站';
-    if (subwayDist <= 0.15)      reasons.push({ type: 'positive', icon: '🚇', text: `${stationName}仅 ${ft} 英尺，出行极便利` });
-    else if (subwayDist <= 0.4)  reasons.push({ type: 'neutral',  icon: '🚶', text: `距${stationName} ${ft} 英尺，步行可达` });
-    else                         reasons.push({ type: 'negative', icon: '⚠️', text: `距${stationName} ${ft} 英尺，交通略不便` });
+  if ((cats.TRANSPORT || 0) >= 2) {
+    reasons.push({ type: 'positive', icon: '🚌',
+      text: `${cats.TRANSPORT} 个交通枢纽设施，全天候稳定客流，适合快取场景` });
+  } else if ((cats.TRANSPORT || 0) === 1) {
+    reasons.push({ type: 'neutral', icon: '🚌',
+      text: `1 个交通节点附近，候车等待客群有潜力` });
+  }
+
+  if ((cats.SHOPPING || 0) >= 2) {
+    reasons.push({ type: 'positive', icon: '🛍️',
+      text: `${cats.SHOPPING} 个商业设施，周末 + 下班后客流活跃` });
+  }
+  if ((cats.EDUCATION || 0) >= 1) {
+    reasons.push({ type: 'neutral', icon: '🎓',
+      text: `${cats.EDUCATION} 所学校/教育机构附近，午后学生客群稳定` });
+  }
+
+  // ── Location tier note ─────────────────────────────────────────────────────
+  if (mtaInfo && mtaInfo.weeklyRidership >= 300000) {
+    reasons.push({ type: 'neutral', icon: '📍',
+      text: `位于纽约 ${getRidershipLabel(mtaInfo.weeklyRidership)} 辐射区，商业价值高，但租金水平也相应偏高，需评估租金/营收比` });
+  }
+
+  // ── Time coverage ──────────────────────────────────────────────────────────
+  if ((cats.TRANSPORT || 0) >= 1 && (cats.OFFICE || 0) >= 1) {
+    reasons.push({ type: 'positive', icon: '⏰',
+      text: '全天候客流结构：早高峰（通勤）→ 午餐（办公楼）→ 晚高峰（归途）' });
+  } else if ((cats.RESIDENTIAL || 0) > pois.length * 0.5) {
+    reasons.push({ type: 'negative', icon: '🏘️',
+      text: '周边以居住区为主，工作日中段与非高峰时段客流稀疏，营业效率有限' });
   }
 
   return reasons;
 }
 
-/** Generate final recommendation */
-function generateRecommendation(overall) {
-  if (overall >= 75) return { text: '该位置综合条件优秀，人流量充足、竞争适中、交通便利，强烈建议优先考虑。', action: '建议立即推进选址流程', color: '#10B981' };
-  if (overall >= 60) return { text: '该位置条件较好，但部分维度有改善空间，可结合实地考察后决策。', action: '建议实地考察后决定', color: '#3B82F6' };
-  if (overall >= 45) return { text: '该位置条件一般，人流量或竞争环境存在明显短板，需谨慎评估。', action: '建议谨慎评估，对比其他候选', color: '#F59E0B' };
-  return { text: '该位置综合条件较差，不建议作为优先选址。', action: '建议寻找更好的替代位置', color: '#EF4444' };
+function generateRecommendation(overall, breakdown, mtaInfo, competitorCount) {
+  const isHighTraffic    = mtaInfo && mtaInfo.weeklyRidership >= 300000;
+  const isLowCompetition = competitorCount === 0;
+
+  if (overall >= 82) {
+    return {
+      text:   '综合评分优秀：人流充足、区位价值高、竞争环境良好，强烈建议优先推进。',
+      action: '建议立即启动选址谈判',
+      color:  '#10B981'
+    };
+  }
+  if (overall >= 65) {
+    if (isHighTraffic && !isLowCompetition) {
+      return {
+        text:   '高流量区域但竞争明显，库迪需以性价比或速取体验为差异化切入点。',
+        action: '建议详细竞品调研 + 实地考察定价策略',
+        color:  '#3B82F6'
+      };
+    }
+    if (!isHighTraffic && isLowCompetition) {
+      return {
+        text:   '竞争空白但客流有待验证，建议工作日早高峰实地统计真实人流。',
+        action: '建议实地踩点（工作日 7–9am）',
+        color:  '#3B82F6'
+      };
+    }
+    return {
+      text:   '综合条件较好，可纳入候选名单，结合实地考察后决策。',
+      action: '建议实地考察并比较 2–3 个候选位置',
+      color:  '#3B82F6'
+    };
+  }
+  if (overall >= 50) {
+    return {
+      text:   '综合条件中等，关键维度（人流 / 竞争 / 生态）存在明显短板，需谨慎。',
+      action: '建议对比更优位置后再做决定',
+      color:  '#F59E0B'
+    };
+  }
+  return {
+    text:   '综合评分偏低，选址条件不理想，建议寻找替代位置。',
+    action: '建议排除，优先考虑其他候选',
+    color:  '#EF4444'
+  };
 }
 
+// ─── Traffic data generators ──────────────────────────────────────────────────
+
 /**
- * Generate hourly traffic data for a full day.
- * Scales visitor counts using real MTA station ridership when available.
+ * Hourly visitor estimate for a full day.
+ * Anchored to real MTA ridership when available (3% café capture rate).
  */
 export function generateDailyTrafficData(pois = [], isWeekend = false, mtaInfo = null) {
   const hourlyDist = generateHourlyDistribution(isWeekend);
 
-  // Base factor: blend POI density + real ridership
-  let baseFactor = Math.min(1.0, 0.3 + pois.length * 0.03);
-
+  let baseFactor;
   if (mtaInfo) {
-    // Anchor on real weekly ridership → estimated daily → per-hour base
-    // weeklyRidership / 7 days / 18 active hours ≈ hourly visitors near station
-    const estHourlyBase = mtaInfo.station.weeklyRidership / 7 / 18;
-    // Cotti will capture ~2-5% of passersby → use 3%
-    const cottiFraction = 0.03;
-    const baseVisitors = estHourlyBase * cottiFraction;
-    // Normalize: baseFactor as multiplier relative to 300 default
-    baseFactor = Math.min(3.0, baseVisitors / 300);
+    // estHourlyBase = how many people transit this station per hour on average
+    const estHourlyBase = mtaInfo.weeklyRidership / 7 / 18;
+    // Café capture rate: 2-4% of nearby foot traffic enters
+    const baseVisitors = estHourlyBase * 0.03;
+    baseFactor = Math.min(4.0, baseVisitors / 200);
+  } else {
+    baseFactor = Math.min(1.0, 0.3 + pois.length * 0.04);
   }
 
-  return hourlyDist.map(({ hour, traffic, label }) => {
-    const estimatedVisitors = Math.max(1, Math.round(traffic * baseFactor * 300));
-    return {
-      hour,
-      traffic: Math.round(traffic * 100),
-      visitors: estimatedVisitors,
-      label,
-      isPeak: traffic >= 0.8
-    };
-  });
+  return hourlyDist.map(({ hour, traffic, label }) => ({
+    hour,
+    traffic:  Math.round(traffic * 100),
+    visitors: Math.max(1, Math.round(traffic * baseFactor * 200)),
+    label,
+    isPeak:   traffic >= 0.8
+  }));
 }
 
 /**
- * Calculate weekly pattern (Mon–Sun).
+ * Daily visitor pattern for Mon–Sun.
  */
 export function generateWeeklyPattern(pois = [], mtaInfo = null) {
-  let baseFactor = Math.min(1.0, 0.3 + pois.length * 0.03);
-
+  let baseFactor;
   if (mtaInfo) {
-    const estDailyBase = mtaInfo.station.weeklyRidership / 7;
-    const baseVisitors = estDailyBase * 0.03;
-    baseFactor = Math.min(3.0, baseVisitors / 4000);
+    const estDailyBase = mtaInfo.weeklyRidership / 7;
+    baseFactor = Math.min(4.0, (estDailyBase * 0.03) / 2500);
+  } else {
+    baseFactor = Math.min(1.0, 0.3 + pois.length * 0.04);
   }
 
   const days     = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const patterns = [0.82,   0.80,   0.83,   0.85,   0.90,   0.78,   0.65];
+  const patterns = [0.82,   0.80,   0.83,   0.85,   0.92,   0.72,   0.60];
 
   return days.map((day, i) => ({
     day,
-    traffic: Math.round(patterns[i] * 100),
-    visitors: Math.max(10, Math.round(patterns[i] * baseFactor * 4000)),
+    traffic:  Math.round(patterns[i] * 100),
+    visitors: Math.max(10, Math.round(patterns[i] * baseFactor * 2500)),
     isWeekend: i >= 5
   }));
 }

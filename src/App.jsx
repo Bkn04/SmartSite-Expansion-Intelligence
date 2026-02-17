@@ -55,7 +55,7 @@ function App() {
     isLoading: poisLoading,
     refreshPOIs,
     getPOIsNearStore
-  } = usePOI(stores, showPOIZones);
+  } = usePOI(stores, showPOIZones || showScoring);
 
   const {
     subwayRoutes,

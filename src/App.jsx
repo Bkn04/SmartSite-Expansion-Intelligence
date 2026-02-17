@@ -5,6 +5,8 @@ import StoreList from './components/Controls/StoreList';
 import RouteSummary from './components/RoutePanel/RouteSummary';
 import SubwayInstructions from './components/RoutePanel/SubwayInstructions';
 import POIAnalysis from './components/Analysis/POIAnalysis';
+import LocationScore from './components/Analysis/LocationScore';
+import TrafficChart from './components/Analysis/TrafficChart';
 import { useStores } from './hooks/useStores';
 import { useRoute } from './hooks/useRoute';
 import { useCompetitors } from './hooks/useCompetitors';
@@ -12,6 +14,8 @@ import { usePOI } from './hooks/usePOI';
 import { useSubway } from './hooks/useSubway';
 import { calculateFootTrafficScore, generateHeatmapData } from './services/heatmap';
 import { analyzePOIDistribution } from './services/poi';
+import { calculateLocationScore, generateDailyTrafficData, generateWeeklyPattern } from './services/scoring';
+import { findNearestSubwayStation } from './services/subway';
 
 function App() {
   const {
@@ -36,6 +40,8 @@ function App() {
   const [showSubway, setShowSubway] = useState(false);
   const [showPOIZones, setShowPOIZones] = useState(false);
   const [showHeatmap, setShowHeatmap] = useState(false);
+  const [showScoring, setShowScoring] = useState(false);
+  const [selectedStoreId, setSelectedStoreId] = useState(null);
 
   const {
     competitors,
@@ -89,6 +95,54 @@ function App() {
     });
     return result;
   }, [stores, pois, getPOIsNearStore]);
+
+  // Resolve selected store (default to first store)
+  const selectedStore = useMemo(() => {
+    if (!stores.length) return null;
+    return stores.find(s => s.id === selectedStoreId) || stores[0];
+  }, [stores, selectedStoreId]);
+
+  // POIs near the selected store
+  const selectedStorePOIs = useMemo(() => {
+    if (!selectedStore) return [];
+    return getPOIsNearStore(selectedStore.id) || [];
+  }, [selectedStore, getPOIsNearStore, pois]);
+
+  // Competitors near the selected store (within ~322m / 0.2 miles)
+  const selectedStoreCompetitors = useMemo(() => {
+    if (!selectedStore || !competitors.length) return [];
+    return competitors.filter(c => {
+      if (!c.coordinates) return false;
+      const dlat = (c.coordinates.lat - selectedStore.coordinates.lat) * 111000;
+      const dlng = (c.coordinates.lng - selectedStore.coordinates.lng) * 85000;
+      return Math.sqrt(dlat * dlat + dlng * dlng) <= 322;
+    });
+  }, [selectedStore, competitors]);
+
+  // Comprehensive investment score for selected store
+  const scoreResult = useMemo(() => {
+    if (!showScoring || !selectedStore) return null;
+    const nearest = findNearestSubwayStation(
+      selectedStore.coordinates.lat,
+      selectedStore.coordinates.lng
+    );
+    return calculateLocationScore({
+      pois: selectedStorePOIs,
+      competitors: selectedStoreCompetitors,
+      nearestSubwayDistance: nearest ? nearest.distance : null
+    });
+  }, [showScoring, selectedStore, selectedStorePOIs, selectedStoreCompetitors]);
+
+  // Daily and weekly traffic data for selected store
+  const dailyTraffic = useMemo(() => {
+    if (!showScoring || !selectedStore) return [];
+    return generateDailyTrafficData(selectedStorePOIs);
+  }, [showScoring, selectedStore, selectedStorePOIs]);
+
+  const weeklyPattern = useMemo(() => {
+    if (!showScoring || !selectedStore) return [];
+    return generateWeeklyPattern(selectedStorePOIs);
+  }, [showScoring, selectedStore, selectedStorePOIs]);
 
   return (
     <div className="app-container">
@@ -205,8 +259,54 @@ function App() {
                 >
                   {showHeatmap ? '✓ 热力图' : '🔥 热力图'}
                 </button>
+                <button
+                  className={`btn btn-sm ${showScoring ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setShowScoring(!showScoring)}
+                  style={{ gridColumn: '1 / -1' }}
+                >
+                  {showScoring ? '✓ 选址评分 & 人流监控' : '⭐ 选址评分 & 人流监控'}
+                </button>
               </div>
+
+              {/* Store selector for scoring */}
+              {showScoring && stores.length > 1 && (
+                <div style={{ marginTop: '10px' }}>
+                  <label style={{ fontSize: '12px', color: '#6B7280', display: 'block', marginBottom: '4px' }}>
+                    选择评分店铺：
+                  </label>
+                  <select
+                    className="form-input"
+                    style={{ fontSize: '12px', padding: '6px 8px' }}
+                    value={selectedStoreId || (stores[0]?.id ?? '')}
+                    onChange={e => setSelectedStoreId(e.target.value)}
+                  >
+                    {stores.map(s => (
+                      <option key={s.id} value={s.id}>
+                        {s.name || s.displayAddress || s.address}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
+          )}
+
+          {/* Location Score Panel */}
+          {showScoring && selectedStore && (
+            <LocationScore
+              scoreResult={scoreResult}
+              storeName={selectedStore.name || selectedStore.displayAddress || selectedStore.address}
+              isLoading={poisLoading}
+            />
+          )}
+
+          {/* Traffic Chart Panel */}
+          {showScoring && selectedStore && dailyTraffic.length > 0 && (
+            <TrafficChart
+              dailyTraffic={dailyTraffic}
+              weeklyPattern={weeklyPattern}
+              storeName={selectedStore.name || selectedStore.displayAddress || selectedStore.address}
+            />
           )}
 
           {/* Store List */}

@@ -25,19 +25,24 @@ export function useCompetitors(stores, enabled = false) {
     setError(null);
 
     try {
-      // Try cache — only if it covers ALL current stores
+      // Try cache — only if it exactly matches the current store set
+      // (catches both added stores and removed stores)
       const cached = await competitorStorage.get();
       if (cached && cached.competitors && cached.competitors.length > 0) {
-        const cachedStoreIds = new Set(cached.competitors.flatMap(c => c.nearStores || []));
-        const allStoresCovered = stores.every(s => cachedStoreIds.has(s.id));
+        const currentStoreIds = new Set(stores.map(s => s.id));
+        const cachedStoreIds  = new Set(cached.competitors.flatMap(c => c.nearStores || []));
 
-        if (allStoresCovered) {
+        const allCurrentCovered = stores.every(s => cachedStoreIds.has(s.id));
+        const noRemovedStores   = Array.from(cachedStoreIds).every(id => currentStoreIds.has(id));
+
+        if (allCurrentCovered && noRemovedStores) {
           setCompetitors(cached.competitors);
           setDataSource(cached.source || 'osm');
           setIsLoading(false);
           return;
         }
-        // New store added — fall through to full reload
+        // Store set changed (added or removed) — full reload
+        await competitorStorage.clear();
       }
 
       let freshCompetitors = null;

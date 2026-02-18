@@ -27,14 +27,17 @@ export function usePOI(stores, enabled = false) {
     setError(null);
 
     try {
-      // Try to load from cache — only if it covers ALL current stores
+      // Try to load from cache — only if it exactly matches the current store set
       const cached = await poiStorage.get();
 
       if (cached && cached.pois && cached.pois.length > 0) {
-        const cachedStoreIds = new Set(cached.pois.flatMap(p => p.nearStores || []));
-        const allStoresCovered = stores.every(s => cachedStoreIds.has(s.id));
+        const currentStoreIds = new Set(stores.map(s => s.id));
+        const cachedStoreIds  = new Set(cached.pois.flatMap(p => p.nearStores || []));
 
-        if (allStoresCovered) {
+        const allCurrentCovered = stores.every(s => cachedStoreIds.has(s.id));
+        const noRemovedStores   = Array.from(cachedStoreIds).every(id => currentStoreIds.has(id));
+
+        if (allCurrentCovered && noRemovedStores) {
           setPois(cached.pois);
           const poiAnalysis = analyzePOIDistribution(cached.pois);
           setAnalysis(poiAnalysis);
@@ -42,7 +45,8 @@ export function usePOI(stores, enabled = false) {
           setIsLoading(false);
           return;
         }
-        // Cache doesn't cover a new store — fall through to full reload
+        // Store set changed — clear stale cache and do full reload
+        await poiStorage.clear();
       }
 
       // Fetch from API for all stores

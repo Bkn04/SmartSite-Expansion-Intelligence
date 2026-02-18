@@ -143,7 +143,7 @@ export function calculateSubwayRoute(fromLat, fromLng, toLat, toLng) {
           estimatedSubwayTime,
           totalTime: (walkToStation * 12) + estimatedSubwayTime + (walkFromStation * 12), // 12 min/mile walking
           transfers: 0,
-          cost: 2.90
+          cost: 3.00
         });
       } else {
         // Transfer route (simplified)
@@ -166,7 +166,7 @@ export function calculateSubwayRoute(fromLat, fromLng, toLat, toLng) {
             estimatedSubwayTime,
             totalTime: (walkToStation * 12) + estimatedSubwayTime + (walkFromStation * 12) + 5, // +5 min transfer
             transfers: 1,
-            cost: 2.90 // Single fare covers transfers
+            cost: 3.00 // Single fare covers transfers
           });
         }
       }

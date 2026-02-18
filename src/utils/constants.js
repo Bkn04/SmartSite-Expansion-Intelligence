@@ -22,9 +22,9 @@ export const NYC_BOUNDS = {
 
 // Transportation Settings
 export const TRANSPORT = {
-  SUBWAY_FARE: 2.90,
-  BUS_FARE: 2.90,
-  PATH_FARE: 2.75,
+  SUBWAY_FARE: 3.00,
+  BUS_FARE: 3.00,
+  PATH_FARE: 2.90,
 
   // Distance thresholds in miles
   WALKING_MAX: 0.3,

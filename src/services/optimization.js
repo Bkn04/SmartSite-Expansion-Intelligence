@@ -161,7 +161,7 @@ export function calculateRouteStats(currentLocation, route, transportMode = 'mix
   } else if (transportMode === 'subway') {
     // Assume mostly subway with some walking
     totalTime = (route.length * 15) + 20; // 15 min per stop + 20 min buffer
-    totalCost = (route.length + 1) * 2.90; // Subway fare per segment
+    totalCost = (route.length + 1) * 3.00; // Subway fare per segment
   } else {
     // Mixed mode: estimate based on distance
     // <0.5 miles: walk, >0.5 miles: subway
@@ -180,7 +180,7 @@ export function calculateRouteStats(currentLocation, route, transportMode = 'mix
       } else {
         // Subway
         totalTime += 15; // Average subway trip
-        totalCost += 2.90;
+        totalCost += 3.00;
       }
 
       current = store.coordinates;

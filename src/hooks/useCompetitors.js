@@ -25,13 +25,19 @@ export function useCompetitors(stores, enabled = false) {
     setError(null);
 
     try {
-      // Try cache first
+      // Try cache — only if it covers ALL current stores
       const cached = await competitorStorage.get();
-      if (cached && cached.competitors) {
-        setCompetitors(cached.competitors);
-        setDataSource(cached.source || 'osm');
-        setIsLoading(false);
-        return;
+      if (cached && cached.competitors && cached.competitors.length > 0) {
+        const cachedStoreIds = new Set(cached.competitors.flatMap(c => c.nearStores || []));
+        const allStoresCovered = stores.every(s => cachedStoreIds.has(s.id));
+
+        if (allStoresCovered) {
+          setCompetitors(cached.competitors);
+          setDataSource(cached.source || 'osm');
+          setIsLoading(false);
+          return;
+        }
+        // New store added — fall through to full reload
       }
 
       let freshCompetitors = null;
